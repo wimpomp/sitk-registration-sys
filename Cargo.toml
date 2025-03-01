@@ -1,0 +1,31 @@
+[package]
+name = "sitk-registration-sys"
+version = "2025.3.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "register and interpolate images"
+rust-version = "1.85.0"
+authors = ["Wim Pomp <w.pomp@nki.nl>"]
+homepage = "https://github.com/wimpomp/sitk-registration-sys"
+repository = "https://github.com/wimpomp/sitk-registration-sys"
+documentation = "https://docs.rs/sitk-registration-sys"
+readme = "README.md"
+keywords = ["registration", "affine", "bspline", "transform"]
+categories = ["multimedia::images", "science"]
+
+[lib]
+name = "sitk_regsitration_sys"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.96"
+libc = "0.2.170"
+ndarray = "0.16.1"
+num = "0.4.3"
+
+[dev-dependencies]
+tiffwrite = "2025.2.0"
+
+[build-dependencies]
+cmake = "0.1.54"
+git2 = "0.20.0"
