@@ -1,10 +1,27 @@
 #include <SimpleITK.h>
 #include <sitkImageOperators.h>
 #include <cstring>
+#include <filesystem>
 
 namespace sitk = itk::simple;
 
 using namespace std;
+
+
+std::string gen_random(const int len) {
+    static const char alphanum[] =
+        "0123456789"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz";
+    std::string tmp_s;
+    tmp_s.reserve(len);
+
+    for (int i = 0; i < len; ++i) {
+        tmp_s += alphanum[rand() % (sizeof(alphanum) - 1)];
+    }
+
+    return tmp_s;
+}
 
 
 template <typename T> 
@@ -45,7 +62,7 @@ sitk::Image make_image(
   } else if (id == sitk::PixelIDValueEnum::sitkFloat64) {
     double* b = im.GetBufferAsDouble();
     memcpy(b, image, width * height * 8);
-  } 
+  }
   return im;
 }
 
@@ -114,7 +131,7 @@ interp_u16(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkUInt16);
   im = interp(transform, origin, im, bspline_or_nn);
   uint16_t* c = im.GetBufferAsUInt16();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 2);
 }
 
 extern "C" void
@@ -129,7 +146,7 @@ interp_i16(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkInt16);
   im = interp(transform, origin, im, bspline_or_nn);
   int16_t* c = im.GetBufferAsInt16();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 2);
 }
 
 extern "C" void
@@ -144,7 +161,7 @@ interp_u32(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkUInt32);
   im = interp(transform, origin, im, bspline_or_nn);
   uint32_t* c = im.GetBufferAsUInt32();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 4);
 }
 
 extern "C" void
@@ -159,7 +176,7 @@ interp_i32(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkInt32);
   im = interp(transform, origin, im, bspline_or_nn);
   int32_t* c = im.GetBufferAsInt32();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 4);
 }
 
 extern "C" void
@@ -174,7 +191,7 @@ interp_u64(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkUInt64);
   im = interp(transform, origin, im, bspline_or_nn);
   uint64_t* c = im.GetBufferAsUInt64();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 8);
 }
 
 extern "C" void
@@ -189,7 +206,7 @@ interp_i64(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkInt64);
   im = interp(transform, origin, im, bspline_or_nn);
   int64_t* c = im.GetBufferAsInt64();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 8);
 }
 
 extern "C" void
@@ -204,7 +221,7 @@ interp_f32(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkFloat32);
   im = interp(transform, origin, im, bspline_or_nn);
   float* c = im.GetBufferAsFloat();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 4);
 }
 
 extern "C" void
@@ -219,48 +236,97 @@ interp_f64(
   sitk::Image im = make_image(width, height, *image, sitk::PixelIDValueEnum::sitkFloat64);
   im = interp(transform, origin, im, bspline_or_nn);
   double* c = im.GetBufferAsDouble();
-  memcpy(*image, c, width * height);
+  memcpy(*image, c, width * height * 8);
+}
+
+
+void
+reg2(
+    sitk::Image fixed,
+    sitk::Image moving,
+    bool t_or_a,
+    double** transform
+) {
+    try {
+        string kind = (t_or_a == false) ? "translation" : "affine";
+
+        sitk::ImageRegistrationMethod R;
+        R.SetMetricAsMattesMutualInformation();
+        const double       maxStep = 4.0;
+        const double       minStep = 0.01;
+        const unsigned int numberOfIterations = 200;
+        const double       relaxationFactor = 0.5;
+    //     R.SetOptimizerAsLBFGSB(maxStep, minStep, numberOfIterations, relaxationFactor);
+        R.SetOptimizerAsRegularStepGradientDescent(maxStep, minStep, numberOfIterations, relaxationFactor);
+    //     R.SetOptimizerAsLBFGS2();
+        vector<double> matrix = {1.0, 0.0, 0.0, 1.0};
+        vector<double> translation = {0., 0.};
+        vector<double> origin = {399.5, 299.5};
+        R.SetInitialTransform(sitk::AffineTransform(matrix, translation, origin));
+        R.SetInterpolator(sitk::sitkBSpline);
+        sitk::Transform outTx = R.Execute(fixed, moving);
+        vector<double> t = outTx.GetParameters();
+        for (int i = 0; i < t.size(); i++) {
+            cout << t[i] << " ";
+            (*transform)[i] = t[i];
+        }
+    } catch (const std::exception &exc) {
+        cerr << exc.what();
+    }
 }
 
 
 void
 reg(
-  sitk::Image fixed,
-  sitk::Image moving,
-  bool t_or_a,
-  double** transform
+    sitk::Image fixed,
+    sitk::Image moving,
+    bool t_or_a,
+    double** transform
 ) {
-  try {
-    string kind = (t_or_a == false) ? "translation" : "affine";
-    sitk::ElastixImageFilter tfilter = sitk::ElastixImageFilter();
-    tfilter.LogToConsoleOff();
-    tfilter.SetFixedImage(fixed);
-    tfilter.SetMovingImage(moving);
-    tfilter.SetParameterMap(sitk::GetDefaultParameterMap(kind));
-    tfilter.Execute();
+    try {
+        string kind = (t_or_a == false) ? "translation" : "affine";
+//         std::filesystem::path output_path = std::filesystem::temp_directory_path() / gen_random(12);
+        std::filesystem::path output_path = std::filesystem::temp_directory_path();
+//         std::filesystem::create_directory(output_path);
 
-    sitk::ElastixImageFilter::ParameterMapType parameter_map = tfilter.GetTransformParameterMap(0);
-    for (sitk::ElastixImageFilter::ParameterMapType::iterator parameter = parameter_map.begin(); parameter != parameter_map.end(); ++parameter) {
-      if (parameter->first == "TransformParameters") {
-        vector<string> tp = parameter->second;
-        if (t_or_a == true) {
-          for (int j = 0; j < tp.size(); j++) {
-            (*transform)[j] = stod(tp[j]);
-          }
-        } else {
-          (*transform)[0] = 1.0;
-          (*transform)[1] = 0.0;
-          (*transform)[2] = 0.0;
-          (*transform)[3] = 1.0;
-          for (int j = 0; j < tp.size(); j++) {
-            (*transform)[j + 4] = stod(tp[j]);
+        sitk::ElastixImageFilter tfilter = sitk::ElastixImageFilter();
+        tfilter.LogToConsoleOff();
+        tfilter.LogToFileOff();
+        tfilter.SetLogToFile(false);
+        tfilter.SetFixedImage(fixed);
+        tfilter.SetMovingImage(moving);
+        tfilter.SetParameterMap(sitk::GetDefaultParameterMap(kind));
+        tfilter.SetParameter("WriteResultImage", "false");
+        tfilter.SetOutputDirectory(output_path);
+//         cout << "output_path: " << output_path << endl;
+    //     tfilter.PrintParameterMap();
+//         cout << "r6 " << std::flush;
+        tfilter.Execute();
+//         cout << "r7 " << std::flush;
+        sitk::ElastixImageFilter::ParameterMapType parameter_map = tfilter.GetTransformParameterMap(0);
+        for (sitk::ElastixImageFilter::ParameterMapType::iterator parameter = parameter_map.begin(); parameter != parameter_map.end(); ++parameter) {
+            if (parameter->first == "TransformParameters") {
+                vector<string> tp = parameter->second;
+                if (t_or_a == true) {
+                    for (int j = 0; j < tp.size(); j++) {
+                        (*transform)[j] = stod(tp[j]);
+                    }
+                } else {
+                    (*transform)[0] = 1.0;
+                    (*transform)[1] = 0.0;
+                    (*transform)[2] = 0.0;
+                    (*transform)[3] = 1.0;
+                for (int j = 0; j < tp.size(); j++) {
+                    (*transform)[j + 4] = stod(tp[j]);
+                }
+            }
+          break;
           }
         }
-      }
-    } 
-  } catch (const std::exception &exc) {
-    cerr << exc.what();
-  }
+//         cout << "r8 " << std::flush;
+    } catch (const std::exception &exc) {
+        cerr << exc.what();
+    }
 } 
 
 

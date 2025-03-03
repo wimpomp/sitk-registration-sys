@@ -1,6 +1,6 @@
 [package]
 name = "sitk-registration-sys"
-version = "2025.3.0"
+version = "2025.3.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "register and interpolate images"
@@ -22,9 +22,9 @@ anyhow = "1.0.96"
 libc = "0.2.170"
 ndarray = "0.16.1"
 num = "0.4.3"
-
-[dev-dependencies]
-tiffwrite = "2025.2.0"
+one_at_a_time_please = "1.0.1"
+serde = {  version = "1.0.218", features = ["derive"] }
+serde_yaml = "0.9.33"
 
 [build-dependencies]
 cmake = "0.1.54"

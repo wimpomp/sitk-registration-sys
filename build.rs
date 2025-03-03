@@ -41,7 +41,6 @@ fn main() {
                 .define("SimpleITK_USE_ELASTIX", "ON")
                 .build();
         }
-        // println!("cargo::rustc-env=CMAKE_INSTALL_PREFIX=/home/wim/code/rust/sitk-sys/cpp");
         println!(
             "cargo::rustc-env=CMAKE_INSTALL_PREFIX={}",
             out_dir.display()
@@ -57,6 +56,6 @@ fn main() {
         println!("cargo::rustc-link-search={}", path.join("build").display());
         println!("cargo::rustc-link-lib=dylib=sitk_adapter");
         println!("cargo::rerun-if-changed=build.rs");
-        println!("cargo::rerun-if-changed=cpp/*.cxx");
+        println!("cargo::rerun-if-changed=cpp");
     }
 }

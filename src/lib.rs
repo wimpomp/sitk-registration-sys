@@ -3,10 +3,13 @@ mod sys;
 use crate::sys::{PixelType, interp, register};
 use anyhow::{Result, anyhow};
 use ndarray::{Array2, ArrayView2, array, s};
+use serde::{Deserialize, Serialize};
+use serde_yaml::{from_reader, to_writer};
+use std::fs::File;
 use std::ops::Mul;
 use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Transform {
     pub parameters: [f64; 6],
     pub dparameters: [f64; 6],
@@ -94,13 +97,16 @@ impl Transform {
     }
 
     /// read a transform from a file
-    pub fn from_file(file: PathBuf) -> Result<Self> {
-        todo!()
+    pub fn from_file(path: PathBuf) -> Result<Self> {
+        let file = File::open(path)?;
+        Ok(from_reader(file)?)
     }
 
     /// write a transform to a file
-    pub fn to_file(&self, file: PathBuf) -> Result<()> {
-        todo!()
+    pub fn to_file(&self, path: PathBuf) -> Result<()> {
+        let mut file = File::open(path)?;
+        to_writer(&mut file, self)?;
+        Ok(())
     }
 
     /// true if transform does nothing
@@ -190,18 +196,17 @@ impl Transform {
         }
 
         let m = self.matrix();
-        let d0 = det(m.slice(s![1.., 1..]));
-        if d0 == 0f64 {
+        let d = det(m.slice(s![..2, ..2]));
+        if d == 0f64 {
             return Err(anyhow!("transform matrix is not invertible"));
         }
-        let d2 = det(m.slice(s![..2, ..2]));
         let parameters = [
-            d0 / d2,
-            -det(m.slice(s![..;2, 1..])) / d2,
-            -det(m.slice(s![1.., ..;2])) / d2,
-            det(m.slice(s![..;2, ..;2])) / d2,
-            det(m.slice(s![..2, 1..])) / d2,
-            -det(m.slice(s![..2, ..;2])) / d2,
+            det(m.slice(s![1.., 1..])) / d,
+            -det(m.slice(s![..;2, 1..])) / d,
+            -det(m.slice(s![1.., ..;2])) / d,
+            det(m.slice(s![..;2, ..;2])) / d,
+            det(m.slice(s![..2, 1..])) / d,
+            -det(m.slice(s![..2, ..;2])) / d,
         ];
 
         Ok(Transform {
@@ -228,10 +233,9 @@ mod tests {
     use anyhow::Result;
     use ndarray::Array2;
     use num::Complex;
-    use tiffwrite::IJTiffFile;
 
     /// An example of generating julia fractals.
-    fn julia_image() -> Result<Array2<u8>> {
+    fn julia_image(shift_x: f32, shift_y: f32) -> Result<Array2<u8>> {
         let imgx = 800;
         let imgy = 600;
 
@@ -241,11 +245,11 @@ mod tests {
         let mut im = Array2::<u8>::zeros((imgy, imgx));
         for x in 0..imgx {
             for y in 0..imgy {
-                let cx = y as f32 * scalex - 1.5;
-                let cy = x as f32 * scaley - 1.5;
+                let cy = (y as f32 + shift_y) * scalex - 1.5;
+                let cx = (x as f32 + shift_x) * scaley - 1.5;
 
                 let c = Complex::new(-0.4, 0.6);
-                let mut z = Complex::new(cx, cy);
+                let mut z = Complex::new(cy, cx);
 
                 let mut i = 0;
                 while i < 255 && z.norm() <= 2.0 {
@@ -259,24 +263,140 @@ mod tests {
         Ok(im)
     }
 
-    #[test]
-    fn test_interp() -> Result<()> {
-        let j = julia_image()?;
-        let mut tif = IJTiffFile::new("interp_test.tif")?;
-        tif.save(&j, 0, 0, 0)?;
-        let shape = j.shape();
-        let origin = [
-            ((shape[1] - 1) as f64) / 2f64,
-            ((shape[0] - 1) as f64) / 2f64,
-        ];
-        let transform = Transform::new([1.2, 0., 0., 1., 10., 0.], origin, [shape[0], shape[1]]);
-        let k = transform.transform_image_bspline(j.view())?;
-        tif.save(&k, 1, 0, 0)?;
+    macro_rules! interp_tests_bspline {
+        ($($name:ident: $t:ty $(,)?)*) => {
+        $(
+            #[test]
+            fn $name() -> Result<()> {
+                let j = julia_image(-120f32, 10f32)?.mapv(|x| x as $t);
+                let k = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
+                let shape = j.shape();
+                let origin = [
+                    ((shape[1] - 1) as f64) / 2f64,
+                    ((shape[0] - 1) as f64) / 2f64,
+                ];
+                let transform = Transform::new([1., 0., 0., 1., 120., -10.], origin, [shape[0], shape[1]]);
+                let n = transform.transform_image_bspline(j.view())?;
+                let d = (k.mapv(|x| x as f64) - n.mapv(|x| x as f64)).powi(2).sum();
+                assert!(d <= (shape[0] * shape[1]) as f64);
+                Ok(())
+            }
+        )*
+        }
+    }
 
-        let t = Transform::register_affine(k.view(), j.view())?;
-        println!("t: {:#?}", t);
-        println!("m: {:#?}", t.matrix());
-        println!("i: {:#?}", t.inverse()?.matrix());
-        Ok(())
+    interp_tests_bspline! {
+        interpbs_u8: u8,
+        interpbs_i8: i8,
+        interpbs_u16: u16,
+        interpbs_i16: i16,
+        interpbs_u32: u32,
+        interpbs_i32: i32,
+        interpbs_u64: u64,
+        interpbs_i64: i64,
+        interpbs_f32: f32,
+        interpbs_f64: f64,
+    }
+
+    macro_rules! interp_tests_nearest_neighbor {
+        ($($name:ident: $t:ty $(,)?)*) => {
+        $(
+            #[test]
+            fn $name() -> Result<()> {
+                let j = julia_image(-120f32, 10f32)?.mapv(|x| x as $t);
+                let k = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
+                let shape = j.shape();
+                let origin = [
+                    ((shape[1] - 1) as f64) / 2f64,
+                    ((shape[0] - 1) as f64) / 2f64,
+                ];
+                let transform = Transform::new([1., 0., 0., 1., 120., -10.], origin, [shape[0], shape[1]]);
+                let n = transform.transform_image_nearest_neighbor(j.view())?;
+                let d = (k.mapv(|x| x as f64) - n.mapv(|x| x as f64)).powi(2).sum();
+                assert!(d <= (shape[0] * shape[1]) as f64);
+                Ok(())
+            }
+        )*
+        }
+    }
+
+    interp_tests_nearest_neighbor! {
+        interpnn_u8: u8,
+        interpnn_i8: i8,
+        interpnn_u16: u16,
+        interpnn_i16: i16,
+        interpnn_u32: u32,
+        interpnn_i32: i32,
+        interpnn_u64: u64,
+        interpnn_i64: i64,
+        interpnn_f32: f32,
+        interpnn_f64: f64,
+    }
+
+    macro_rules! registration_tests_translation {
+        ($($name:ident: $t:ty $(,)?)*) => {
+            $(
+                #[test]
+                fn $name() -> Result<()> {
+                    let j = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
+                    let k = julia_image(10f32, 20f32)?.mapv(|x| x as $t);
+                    let t = Transform::register_translation(j.view(), k.view())?;
+                    let mut m = Array2::eye(3);
+                    m[[0, 2]] = -10f64;
+                    m[[1, 2]] = -20f64;
+                    let d = (t.matrix() - m).powi(2).sum();
+                    assert!(d < 0.01);
+                    Ok(())
+                }
+            )*
+        }
+    }
+
+    registration_tests_translation! {
+        registration_translation_u8: u8,
+        registration_translation_i8: i8,
+        registration_translation_u16: u16,
+        registration_translation_i16: i16,
+        registration_translation_u32: u32,
+        registration_translation_i32: i32,
+        registration_translation_u64: u64,
+        registration_translation_i64: i64,
+        registration_translation_f32: f32,
+        registration_translation_f64: f64,
+    }
+
+    macro_rules! registration_tests_affine {
+        ($($name:ident: $t:ty $(,)?)*) => {
+            $(
+                #[test]
+                fn $name() -> Result<()> {
+                    let j = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
+                    let shape = j.shape();
+                    let origin = [
+                        ((shape[1] - 1) as f64) / 2f64,
+                        ((shape[0] - 1) as f64) / 2f64,
+                    ];
+                    let s = Transform::new([1.2, 0., 0., 1., 5., 7.], origin, [shape[0], shape[1]]);
+                    let k = s.transform_image_bspline(j.view())?;
+                    let t = Transform::register_affine(j.view(), k.view())?.inverse()?;
+                    let d = (t.matrix() - s.matrix()).powi(2).sum();
+                    assert!(d < 0.01);
+                    Ok(())
+                }
+            )*
+        }
+    }
+
+    registration_tests_affine! {
+        registration_tests_affine_u8: u8,
+        registration_tests_affine_i8: i8,
+        registration_tests_affine_u16: u16,
+        registration_tests_affine_i16: i16,
+        registration_tests_affine_u32: u32,
+        registration_tests_affine_i32: i32,
+        registration_tests_affine_u64: u64,
+        registration_tests_affine_i64: i64,
+        registration_tests_affine_f32: f32,
+        registration_tests_affine_f64: f64,
     }
 }

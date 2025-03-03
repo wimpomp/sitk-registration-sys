@@ -4,7 +4,7 @@ This crate does two things:
 - find an affine transform or translation that transforms one image into the other
 - use bpline or nearest neighbor interpolation to apply a transformation to an image
 
-To do this [SimpleITK](https://github.com/SimpleITK/SimpleITK.git), which is written in
+To do this, [SimpleITK](https://github.com/SimpleITK/SimpleITK.git), which is written in
 C++, is used. An adapter library is created to expose the required functionality in SimpleITK
 in a shared library. Because of this, compilation of this crate requires quite some time, as
 wel as cmake.
