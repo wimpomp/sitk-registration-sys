@@ -1,6 +1,7 @@
+use crate::PixelType;
 use anyhow::Result;
 use libc::{c_double, c_uint};
-use ndarray::{Array2, ArrayView2};
+use ndarray::{Array2, AsArray, Ix2};
 use one_at_a_time_please::one_at_a_time;
 use std::ptr;
 
@@ -62,48 +63,17 @@ unsafe extern "C" {
     }
 }
 
-pub trait PixelType: Clone {
-    const PT: u8;
-}
-
-macro_rules! sitk_impl {
-    ($($T:ty: $sitk:expr $(,)?)*) => {
-        $(
-            impl PixelType for $T {
-                const PT: u8 = $sitk;
-            }
-        )*
-    };
-}
-
-sitk_impl! {
-    u8: 1,
-    i8: 2,
-    u16: 3,
-    i16: 4,
-    u32: 5,
-    i32: 6,
-    u64: 7,
-    i64: 8,
-    f32: 9,
-    f64: 10,
-}
-
-#[cfg(target_pointer_width = "64")]
-sitk_impl!(usize: 7);
-#[cfg(target_pointer_width = "32")]
-sitk_impl!(usize: 5);
-#[cfg(target_pointer_width = "64")]
-sitk_impl!(isize: 8);
-#[cfg(target_pointer_width = "32")]
-sitk_impl!(isize: 6);
-
-pub(crate) fn interp<T: PixelType>(
+pub(crate) fn interp<'a, A, T>(
     parameters: [f64; 6],
     origin: [f64; 2],
-    image: ArrayView2<T>,
+    image: A,
     bspline_or_nn: bool,
-) -> Result<Array2<T>> {
+) -> Result<Array2<T>>
+where
+    T: 'a + PixelType,
+    A: AsArray<'a, T, Ix2>,
+{
+    let image = image.into();
     let shape: Vec<usize> = image.shape().to_vec();
     let width = shape[1] as c_uint;
     let height = shape[0] as c_uint;
@@ -220,16 +190,22 @@ pub(crate) fn interp<T: PixelType>(
 }
 
 #[one_at_a_time]
-pub(crate) fn register<T: PixelType>(
-    fixed: ArrayView2<T>,
-    moving: ArrayView2<T>,
+pub(crate) fn register<'a, A, T>(
+    fixed: A,
+    moving: A,
     translation_or_affine: bool,
-) -> Result<([f64; 6], [f64; 2], [usize; 2])> {
+) -> Result<([f64; 6], [f64; 2], [usize; 2])>
+where
+    T: 'a + PixelType,
+    A: AsArray<'a, T, Ix2>,
+{
+    let fixed = fixed.into();
+    let moving = moving.into();
     let shape: Vec<usize> = fixed.shape().to_vec();
     let width = shape[1] as c_uint;
     let height = shape[0] as c_uint;
-    let fixed: Vec<_> = fixed.into_iter().cloned().collect();
-    let moving: Vec<_> = moving.into_iter().cloned().collect();
+    let fixed: Vec<_> = fixed.into_iter().collect();
+    let moving: Vec<_> = moving.into_iter().collect();
     let fixed_ptr = fixed.as_ptr();
     let moving_ptr = moving.as_ptr();
     let mut transform: Vec<c_double> = vec![0.0; 6];

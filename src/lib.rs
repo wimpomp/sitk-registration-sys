@@ -1,13 +1,51 @@
 mod sys;
 
-use crate::sys::{PixelType, interp, register};
+use crate::sys::{interp, register};
 use anyhow::{Result, anyhow};
-use ndarray::{Array2, ArrayView2, array, s};
+use ndarray::{Array2, ArrayView2, AsArray, Ix2, array, s};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{from_reader, to_writer};
 use std::fs::File;
 use std::ops::Mul;
 use std::path::PathBuf;
+
+/// a trait marking number types that can be used in sitk:
+/// (u/i)(8/16/32/64), (u/i)size, f(32/64)
+pub trait PixelType: Clone {
+    const PT: u8;
+}
+
+macro_rules! sitk_impl {
+    ($($T:ty: $sitk:expr $(,)?)*) => {
+        $(
+            impl PixelType for $T {
+                const PT: u8 = $sitk;
+            }
+        )*
+    };
+}
+
+sitk_impl! {
+    u8: 1,
+    i8: 2,
+    u16: 3,
+    i16: 4,
+    u32: 5,
+    i32: 6,
+    u64: 7,
+    i64: 8,
+    f32: 9,
+    f64: 10,
+}
+
+#[cfg(target_pointer_width = "64")]
+sitk_impl!(usize: 7);
+#[cfg(target_pointer_width = "32")]
+sitk_impl!(usize: 5);
+#[cfg(target_pointer_width = "64")]
+sitk_impl!(isize: 8);
+#[cfg(target_pointer_width = "32")]
+sitk_impl!(isize: 6);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Transform {
@@ -47,6 +85,17 @@ impl Mul for Transform {
     }
 }
 
+impl PartialEq<Self> for Transform {
+    fn eq(&self, other: &Self) -> bool {
+        self.parameters == other.parameters
+            && self.dparameters == other.dparameters
+            && self.origin == other.origin
+            && self.shape == other.shape
+    }
+}
+
+impl Eq for Transform {}
+
 impl Transform {
     /// parameters: flat 2x2 part of matrix, translation; origin: center of rotation
     pub fn new(parameters: [f64; 6], origin: [f64; 2], shape: [usize; 2]) -> Self {
@@ -59,10 +108,11 @@ impl Transform {
     }
 
     /// find the affine transform which transforms moving into fixed
-    pub fn register_affine<T: PixelType>(
-        fixed: ArrayView2<T>,
-        moving: ArrayView2<T>,
-    ) -> Result<Transform> {
+    pub fn register_affine<'a, A, T>(fixed: A, moving: A) -> Result<Transform>
+    where
+        T: 'a + PixelType,
+        A: AsArray<'a, T, Ix2>,
+    {
         let (parameters, origin, shape) = register(fixed, moving, true)?;
         Ok(Transform {
             parameters,
@@ -73,10 +123,11 @@ impl Transform {
     }
 
     /// find the translation which transforms moving into fixed
-    pub fn register_translation<T: PixelType>(
-        fixed: ArrayView2<T>,
-        moving: ArrayView2<T>,
-    ) -> Result<Transform> {
+    pub fn register_translation<'a, A, T>(fixed: A, moving: A) -> Result<Transform>
+    where
+        T: 'a + PixelType,
+        A: AsArray<'a, T, Ix2>,
+    {
         let (parameters, origin, shape) = register(fixed, moving, false)?;
         Ok(Transform {
             parameters,
@@ -104,7 +155,11 @@ impl Transform {
 
     /// write a transform to a file
     pub fn to_file(&self, path: PathBuf) -> Result<()> {
-        let mut file = File::open(path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         to_writer(&mut file, self)?;
         Ok(())
     }
@@ -115,23 +170,30 @@ impl Transform {
     }
 
     /// transform an image using nearest neighbor interpolation
-    pub fn transform_image_bspline<T: PixelType>(&self, image: ArrayView2<T>) -> Result<Array2<T>> {
+    pub fn transform_image_bspline<'a, A, T>(&self, image: A) -> Result<Array2<T>>
+    where
+        T: 'a + PixelType,
+        A: AsArray<'a, T, Ix2>,
+    {
         interp(self.parameters, self.origin, image, false)
     }
 
     /// transform an image using bspline interpolation
-    pub fn transform_image_nearest_neighbor<T: PixelType>(
-        &self,
-        image: ArrayView2<T>,
-    ) -> Result<Array2<T>> {
+    pub fn transform_image_nearest_neighbor<'a, A, T>(&self, image: A) -> Result<Array2<T>>
+    where
+        T: 'a + PixelType,
+        A: AsArray<'a, T, Ix2>,
+    {
         interp(self.parameters, self.origin, image, true)
     }
 
     /// get coordinates resulting from transforming input coordinates
-    pub fn transform_coordinates<T>(&self, coordinates: ArrayView2<T>) -> Result<Array2<f64>>
+    pub fn transform_coordinates<'a, A, T>(&self, coordinates: A) -> Result<Array2<f64>>
     where
-        T: Clone + Into<f64>,
+        T: 'a + Clone + Into<f64>,
+        A: AsArray<'a, T, Ix2>,
     {
+        let coordinates = coordinates.into();
         let s = coordinates.shape();
         if s[1] != 2 {
             return Err(anyhow!("coordinates must have two columns"));
@@ -233,6 +295,7 @@ mod tests {
     use anyhow::Result;
     use ndarray::Array2;
     use num::Complex;
+    use tempfile::NamedTempFile;
 
     /// An example of generating julia fractals.
     fn julia_image(shift_x: f32, shift_y: f32) -> Result<Array2<u8>> {
@@ -263,25 +326,35 @@ mod tests {
         Ok(im)
     }
 
+    #[test]
+    fn test_serialization() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let t = Transform::new([1.2, 0.3, -0.4, 0.9, 10.2, -9.5], [59.5, 49.5], [120, 100]);
+        t.to_file(file.path().to_path_buf())?;
+        let s = Transform::from_file(file.path().to_path_buf())?;
+        assert_eq!(s, t);
+        Ok(())
+    }
+
     macro_rules! interp_tests_bspline {
         ($($name:ident: $t:ty $(,)?)*) => {
-        $(
-            #[test]
-            fn $name() -> Result<()> {
-                let j = julia_image(-120f32, 10f32)?.mapv(|x| x as $t);
-                let k = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
-                let shape = j.shape();
-                let origin = [
-                    ((shape[1] - 1) as f64) / 2f64,
-                    ((shape[0] - 1) as f64) / 2f64,
-                ];
-                let transform = Transform::new([1., 0., 0., 1., 120., -10.], origin, [shape[0], shape[1]]);
-                let n = transform.transform_image_bspline(j.view())?;
-                let d = (k.mapv(|x| x as f64) - n.mapv(|x| x as f64)).powi(2).sum();
-                assert!(d <= (shape[0] * shape[1]) as f64);
-                Ok(())
-            }
-        )*
+            $(
+                #[test]
+                fn $name() -> Result<()> {
+                    let j = julia_image(-120f32, 10f32)?.mapv(|x| x as $t);
+                    let k = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
+                    let shape = j.shape();
+                    let origin = [
+                        ((shape[1] - 1) as f64) / 2f64,
+                        ((shape[0] - 1) as f64) / 2f64,
+                    ];
+                    let transform = Transform::new([1., 0., 0., 1., 120., -10.], origin, [shape[0], shape[1]]);
+                    let n = transform.transform_image_bspline(j.view())?;
+                    let d = (k.mapv(|x| x as f64) - n.mapv(|x| x as f64)).powi(2).sum();
+                    assert!(d <= (shape[0] * shape[1]) as f64);
+                    Ok(())
+                }
+            )*
         }
     }
 
@@ -300,23 +373,28 @@ mod tests {
 
     macro_rules! interp_tests_nearest_neighbor {
         ($($name:ident: $t:ty $(,)?)*) => {
-        $(
-            #[test]
-            fn $name() -> Result<()> {
-                let j = julia_image(-120f32, 10f32)?.mapv(|x| x as $t);
-                let k = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
-                let shape = j.shape();
-                let origin = [
-                    ((shape[1] - 1) as f64) / 2f64,
-                    ((shape[0] - 1) as f64) / 2f64,
-                ];
-                let transform = Transform::new([1., 0., 0., 1., 120., -10.], origin, [shape[0], shape[1]]);
-                let n = transform.transform_image_nearest_neighbor(j.view())?;
-                let d = (k.mapv(|x| x as f64) - n.mapv(|x| x as f64)).powi(2).sum();
-                assert!(d <= (shape[0] * shape[1]) as f64);
-                Ok(())
-            }
-        )*
+            $(
+                #[test]
+                fn $name() -> Result<()> {
+                    let j = julia_image(-120f32, 10f32)?.mapv(|x| x as $t);
+                    let k = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
+                    let shape = j.shape();
+                    let origin = [
+                        ((shape[1] - 1) as f64) / 2f64,
+                        ((shape[0] - 1) as f64) / 2f64,
+                    ];
+                    let j0 = j.clone();
+                    let k0 = k.clone();
+                    let transform = Transform::new([1., 0., 0., 1., 120., -10.], origin, [shape[0], shape[1]]);
+                    // make sure j & k weren't mutated
+                    assert!(j.iter().zip(j0.iter()).map(|(a, b)| a == b).all(|x| x));
+                    assert!(k.iter().zip(k0.iter()).map(|(a, b)| a == b).all(|x| x));
+                    let n = transform.transform_image_nearest_neighbor(j.view())?;
+                    let d = (k.mapv(|x| x as f64) - n.mapv(|x| x as f64)).powi(2).sum();
+                    assert!(d <= (shape[0] * shape[1]) as f64);
+                    Ok(())
+                }
+            )*
         }
     }
 
@@ -340,7 +418,12 @@ mod tests {
                 fn $name() -> Result<()> {
                     let j = julia_image(0f32, 0f32)?.mapv(|x| x as $t);
                     let k = julia_image(10f32, 20f32)?.mapv(|x| x as $t);
+                    let j0 = j.clone();
+                    let k0 = k.clone();
                     let t = Transform::register_translation(j.view(), k.view())?;
+                    // make sure j & k weren't mutated
+                    assert!(j.iter().zip(j0.iter()).map(|(a, b)| a == b).all(|x| x));
+                    assert!(k.iter().zip(k0.iter()).map(|(a, b)| a == b).all(|x| x));
                     let mut m = Array2::eye(3);
                     m[[0, 2]] = -10f64;
                     m[[1, 2]] = -20f64;
